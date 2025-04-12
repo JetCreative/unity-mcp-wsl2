@@ -16,6 +16,7 @@ namespace MCPForUnity.Editor.Helpers
         private const string RootFolder = "UnityMCP";
         private const string ServerFolder = "UnityMcpServer";
         private const string VersionFileName = "server_version.txt";
+        private static bool _wslSyncPerformedThisSession = false;
 
         /// <summary>
         /// Ensures the mcp-for-unity-server is installed locally by copying from the embedded package source.
@@ -25,6 +26,8 @@ namespace MCPForUnity.Editor.Helpers
         {
             try
             {
+                EnsureProjectServerAsset();
+
                 string saveLocation = GetSaveLocation();
                 TryCreateMacSymlinkForAppSupport();
                 string destRoot = Path.Combine(saveLocation, ServerFolder);
@@ -46,6 +49,8 @@ namespace MCPForUnity.Editor.Helpers
                     {
                         McpLog.Info("MCP server not found. Download via Window > MCP For Unity > Open MCP Window.", always: false);
                     }
+                    EnsureWslServerInstalled(null);
+                    LogModeSummary(destRoot);
                     return; // Graceful exit - no exception
                 }
 
@@ -97,6 +102,21 @@ namespace MCPForUnity.Editor.Helpers
                     catch { }
                 }
 
+                bool shouldSyncWsl =
+                    McpSettings.RunServerViaWsl
+                    && !string.IsNullOrEmpty(embeddedSrc)
+                    && (needOverwrite || !_wslSyncPerformedThisSession);
+
+                if (shouldSyncWsl)
+                {
+                    EnsureWslServerInstalled(embeddedSrc);
+                    LogModeSummary(destRoot);
+                    if (!string.IsNullOrEmpty(McpSettings.GetWslServerLinuxPath()))
+                    {
+                        _wslSyncPerformedThisSession = true;
+                    }
+                }
+
                 // Clear overrides that might point at legacy locations
                 try
                 {
@@ -125,6 +145,17 @@ namespace MCPForUnity.Editor.Helpers
         public static string GetServerPath()
         {
             return Path.Combine(GetSaveLocation(), ServerFolder, "src");
+        }
+
+        public static string GetWindowsRegistryDirectory()
+        {
+            string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile) ?? string.Empty;
+            return Path.Combine(home, ".unity-mcp");
+        }
+
+        public static bool IsWslAvailableOnHost()
+        {
+            return IsWslAvailable();
         }
 
         /// <summary>
@@ -638,9 +669,10 @@ namespace MCPForUnity.Editor.Helpers
                 McpLog.Info($"Server rebuilt successfully at {destRoot} (version {embeddedVer})");
 
                 // Clear any previous installation error
-
                 PackageLifecycleManager.ClearLastInstallError();
 
+                EnsureWslServerInstalled(embeddedSrc);
+                LogModeSummary(destRoot);
 
                 return true;
             }
@@ -967,6 +999,275 @@ namespace MCPForUnity.Editor.Helpers
                     McpLog.Warn($"Could not delete temp zip file: {ex.Message}");
                 }
             }
+        }
+
+        private static bool ShouldUseWslMode()
+        {
+            return McpSettings.RunServerViaWsl;
+        }
+
+        private static bool IsWslAvailable()
+        {
+            if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            {
+                return false;
+            }
+
+            if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WSL_INTEROP")))
+            {
+                return true;
+            }
+
+            try
+            {
+                string systemDir = Environment.GetFolderPath(Environment.SpecialFolder.System);
+                if (!string.IsNullOrEmpty(systemDir))
+                {
+                    string wslExe = Path.Combine(systemDir, "wsl.exe");
+                    if (File.Exists(wslExe))
+                    {
+                        return true;
+                    }
+                }
+            }
+            catch { }
+
+            return false;
+        }
+
+        private static string EscapeForSingleQuotes(string value)
+        {
+            return string.IsNullOrEmpty(value) ? string.Empty : value.Replace("'", "'\\''");
+        }
+
+        private static bool TryGetWslHome(out string distroName, out string homePath)
+        {
+            distroName = null;
+            homePath = null;
+
+            try
+            {
+                var psi = new ProcessStartInfo
+                {
+                    FileName = "wsl.exe",
+                    Arguments = "-- bash -lc \"printf '%s|%s' \\\"$WSL_DISTRO_NAME\\\" \\\"$HOME\\\"\"",
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true
+                };
+
+                using var proc = Process.Start(psi);
+                if (proc == null)
+                {
+                    return false;
+                }
+
+                proc.WaitForExit(5000);
+                string output = proc.StandardOutput.ReadToEnd().Trim();
+                if (proc.ExitCode != 0 || string.IsNullOrEmpty(output))
+                {
+                    return false;
+                }
+
+                string[] parts = output.Split('|');
+                if (parts.Length != 2)
+                {
+                    return false;
+                }
+
+                distroName = parts[0].Trim();
+                homePath = parts[1].Trim();
+                return !string.IsNullOrEmpty(distroName) && !string.IsNullOrEmpty(homePath);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static bool TryConvertWindowsPathToWsl(string windowsPath, out string wslPath)
+        {
+            wslPath = null;
+            try
+            {
+                if (string.IsNullOrEmpty(windowsPath))
+                {
+                    return false;
+                }
+
+                string escaped = windowsPath.Replace("\"", "\\\"");
+                var psi = new ProcessStartInfo
+                {
+                    FileName = "wsl.exe",
+                    Arguments = $"-- wslpath -a \"{escaped}\"",
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true
+                };
+
+                using var proc = Process.Start(psi);
+                if (proc == null)
+                {
+                    return false;
+                }
+
+                proc.WaitForExit(5000);
+                if (proc.ExitCode != 0)
+                {
+                    return false;
+                }
+
+                string output = proc.StandardOutput.ReadToEnd().Replace("\r", string.Empty).Trim();
+                if (string.IsNullOrEmpty(output))
+                {
+                    return false;
+                }
+
+                wslPath = output;
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static void EnsureWslServerInstalled(string embeddedSrc)
+        {
+            if (!ShouldUseWslMode())
+            {
+                McpSettings.SetWslServerLinuxPath(null);
+                McpSettings.SetRegistryOverride(null);
+                _wslSyncPerformedThisSession = false;
+                return;
+            }
+
+            if (!IsWslAvailable())
+            {
+                McpLog.Warn("WSL mode requested but WSL is not available on this system.");
+                McpSettings.SetWslServerLinuxPath(null);
+                McpSettings.SetRegistryOverride(null);
+                _wslSyncPerformedThisSession = false;
+                return;
+            }
+
+            if (string.IsNullOrEmpty(embeddedSrc))
+            {
+                McpLog.Warn("WSL mode requested but embedded server source is missing.");
+                return;
+            }
+
+            string embeddedRoot = Path.GetDirectoryName(embeddedSrc.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+            if (string.IsNullOrEmpty(embeddedRoot) || !Directory.Exists(embeddedRoot))
+            {
+                McpLog.Warn($"WSL mode requested but embedded server root '{embeddedRoot}' could not be located.");
+                return;
+            }
+
+            if (!TryGetWslHome(out string distroName, out string homePath))
+            {
+                McpLog.Warn("Failed to determine WSL distribution or home directory. Skipping WSL install.");
+                return;
+            }
+
+            if (!TryConvertWindowsPathToWsl(embeddedRoot, out string wslEmbeddedRoot))
+            {
+                McpLog.Warn($"Unable to map Windows path '{embeddedRoot}' to WSL. Skipping WSL install.");
+                return;
+            }
+
+            string linuxRoot = $"{homePath}/.local/share/{RootFolder}/{ServerFolder}";
+            string linuxRootEscaped = EscapeForSingleQuotes(linuxRoot);
+            string wslEmbeddedRootEscaped = EscapeForSingleQuotes(wslEmbeddedRoot);
+            string bashCommand = $"set -e; rm -rf '{linuxRootEscaped}'; mkdir -p '{linuxRootEscaped}'; cp -r '{wslEmbeddedRootEscaped}/.' '{linuxRootEscaped}'";
+
+            try
+            {
+                var psi = new ProcessStartInfo
+                {
+                    FileName = "wsl.exe",
+                    Arguments = $"-- bash -lc \"{bashCommand}\"",
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true
+                };
+
+                using var proc = Process.Start(psi);
+                if (proc == null)
+                {
+                    McpLog.Warn("WSL install failed: unable to start wsl.exe process.");
+                    return;
+                }
+
+                proc.WaitForExit(60000);
+                string stderr = proc.StandardError.ReadToEnd().Trim();
+                if (proc.ExitCode != 0)
+                {
+                    McpLog.Warn($"WSL install failed with exit code {proc.ExitCode}. stderr: {stderr}");
+                    return;
+                }
+
+                McpLog.Info($"Installed MCP server into WSL path '{linuxRoot}'.");
+                McpSettings.SetWslServerLinuxPath($"{linuxRoot}/src");
+                McpSettings.SetRegistryOverride(GetWindowsRegistryDirectory());
+            }
+            catch (Exception ex)
+            {
+                McpLog.Warn($"WSL install failed: {ex.Message}");
+            }
+        }
+
+        private static void LogModeSummary(string windowsServerRoot)
+        {
+            bool wslEnabled = ShouldUseWslMode();
+            string linuxPath = McpSettings.GetWslServerLinuxPath();
+            string registryOverride = McpSettings.GetRegistryOverride();
+
+            if (wslEnabled)
+            {
+                McpLog.Info($"WSL mode enabled. Windows server path: {windowsServerRoot}; WSL server path: {linuxPath ?? "(not synced)"}; registry dir override: {registryOverride ?? "(unset)"}.");
+            }
+            else
+            {
+                McpLog.Info($"WSL mode disabled. Windows server path: {windowsServerRoot}.");
+            }
+        }
+
+        private static void EnsureProjectServerAsset()
+        {
+#if UNITY_EDITOR
+            try
+            {
+                string assetsRoot = Application.dataPath;
+                if (string.IsNullOrEmpty(assetsRoot)) return;
+
+                string destRoot = Path.Combine(assetsRoot, "MCP", "UnityMcpServer~");
+                string destSrc = Path.Combine(destRoot, "src");
+
+                if (File.Exists(Path.Combine(destSrc, "server.py")))
+                {
+                    return;
+                }
+
+                if (!ServerPathResolver.TryFindEmbeddedServerSource(out string embeddedSrc))
+                {
+                    return;
+                }
+
+                string embeddedRoot = Path.GetDirectoryName(embeddedSrc) ?? embeddedSrc;
+                Directory.CreateDirectory(destRoot);
+                CopyDirectoryRecursive(embeddedRoot, destRoot);
+                McpLog.Info($"Created UnityMcpServer~ asset at '{destRoot}'.");
+                try { AssetDatabase.Refresh(); } catch { }
+            }
+            catch (Exception ex)
+            {
+                McpLog.Warn($"Failed to create UnityMcpServer~ asset: {ex.Message}");
+            }
+#endif
         }
 
         /// <summary>

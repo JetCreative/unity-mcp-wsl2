@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Net;
@@ -61,6 +62,8 @@ namespace MCPForUnity.Editor
         private static int mainThreadId;
         private static int currentUnityPort = 6400; // Dynamic port, starts with default
         private static bool isAutoConnectMode = false;
+        private static readonly string PidFilePath = Path.Combine(Application.temporaryCachePath, "mcp_for_unity_bridge.pid");
+        private static volatile bool isShuttingDown = false;
         private const ulong MaxFrameBytes = 64UL * 1024 * 1024; // 64 MiB hard cap for framed payloads
         private const int FrameIOTimeoutMs = 30000; // Per-read timeout to avoid stalled clients
 
@@ -165,6 +168,11 @@ namespace MCPForUnity.Editor
                 writerThread.Start();
             }
             catch { }
+
+            AppDomain.CurrentDomain.ProcessExit += OnProcessExit;
+            AppDomain.CurrentDomain.DomainUnload += OnDomainUnload;
+
+            CleanupResidualResources();
 
             // Skip bridge in headless/batch environments (CI/builds) unless explicitly allowed via env
             // CI override: set UNITY_MCP_ALLOW_BATCH=1 to allow the bridge in batch mode
@@ -301,6 +309,14 @@ namespace MCPForUnity.Editor
         {
             lock (startStopLock)
             {
+                if (isShuttingDown)
+                {
+                    if (IsDebugEnabled())
+                    {
+                        McpLog.Warn("Start requested while bridge is shutting down; aborting start.");
+                    }
+                    return;
+                }
                 // Don't restart if already running on a working port
                 if (isRunning && listener != null)
                 {
@@ -324,7 +340,10 @@ namespace MCPForUnity.Editor
 
                     const int maxImmediateRetries = 3;
                     const int retrySleepMs = 75;
+                    const int maxPortRecoveryAttempts = 3;
+                    const int portRecoveryDelayMs = 1000;
                     int attempt = 0;
+                    int portRecoveryAttempt = 0;
                     for (; ; )
                     {
                         try
@@ -354,20 +373,38 @@ namespace MCPForUnity.Editor
                             listener.Start();
                             break;
                         }
-                        catch (SocketException se) when (se.SocketErrorCode == SocketError.AddressAlreadyInUse && attempt < maxImmediateRetries)
+                        catch (SocketException se) when (se.SocketErrorCode == SocketError.AddressAlreadyInUse)
                         {
-                            attempt++;
-                            Thread.Sleep(retrySleepMs);
-                            continue;
-                        }
-                        catch (SocketException se) when (se.SocketErrorCode == SocketError.AddressAlreadyInUse && attempt >= maxImmediateRetries)
-                        {
-                            // Port is occupied by another instance, get a new available port
+                            if (attempt < maxImmediateRetries)
+                            {
+                                attempt++;
+                                Thread.Sleep(retrySleepMs);
+                                continue;
+                            }
+
+                            if (portRecoveryAttempt < maxPortRecoveryAttempts)
+                            {
+                                portRecoveryAttempt++;
+                                bool freed = TryFreePort(currentUnityPort);
+                                if (freed)
+                                {
+                                    McpLog.Warn($"Port {currentUnityPort} was in use. Attempt {portRecoveryAttempt}/{maxPortRecoveryAttempts} freed the port; retrying bind.");
+                                    Thread.Sleep(portRecoveryDelayMs);
+                                    attempt = 0;
+                                    continue;
+                                }
+                                else
+                                {
+                                    McpLog.Warn($"Attempt {portRecoveryAttempt}/{maxPortRecoveryAttempts} failed to free port {currentUnityPort}. Retrying after delay.");
+                                    Thread.Sleep(portRecoveryDelayMs * 2);
+                                    continue;
+                                }
+                            }
+
+                            // Port remains occupied after recovery attempts; switch to a new available port
                             int oldPort = currentUnityPort;
                             currentUnityPort = PortManager.GetPortWithFallback();
 
-                            // GetPortWithFallback() may return the same port if it became available during wait
-                            // or a different port if switching to an alternative
                             if (IsDebugEnabled())
                             {
                                 if (currentUnityPort == oldPort)
@@ -400,13 +437,18 @@ namespace MCPForUnity.Editor
                             catch (Exception)
                             {
                             }
+
                             listener.Start();
+                            portRecoveryAttempt = 0;
+                            attempt = 0;
                             break;
                         }
                     }
 
                     isRunning = true;
+                    isShuttingDown = false;
                     isAutoConnectMode = false;
+                    CreatePidFile();
                     string platform = Application.platform.ToString();
                     string serverVer = ReadInstalledServerVersionSafe();
                     McpLog.Info($"MCPForUnityBridge started on port {currentUnityPort}. (OS={platform}, server={serverVer})");
@@ -446,6 +488,7 @@ namespace MCPForUnity.Editor
 
                 try
                 {
+                    isShuttingDown = true;
                     // Mark as stopping early to avoid accept logging during disposal
                     isRunning = false;
 
@@ -506,6 +549,9 @@ namespace MCPForUnity.Editor
             {
                 if (IsDebugEnabled()) McpLog.Warn($"Failed to delete status file: {ex.Message}");
             }
+
+            CleanupPidFile();
+            isShuttingDown = false;
 
             if (IsDebugEnabled()) McpLog.Info("MCPForUnityBridge stopped.");
         }
@@ -1178,14 +1224,232 @@ namespace MCPForUnity.Editor
                         @params
                             .Properties()
                             .Select(static p =>
-                                $"{p.Name}: {p.Value?.ToString()?[..Math.Min(20, p.Value?.ToString()?.Length ?? 0)]}"
-                            )
+                            {
+                                string valueText = p.Value != null ? p.Value.ToString() : null;
+                                if (string.IsNullOrEmpty(valueText))
+                                    return $"{p.Name}: ";
+
+                                int length = Math.Min(20, valueText.Length);
+                                return $"{p.Name}: {valueText.Substring(0, length)}";
+                            })
                     );
             }
             catch
             {
                 return "Could not summarize parameters";
             }
+        }
+
+        private static void CreatePidFile()
+        {
+            try
+            {
+                int currentPid = Process.GetCurrentProcess().Id;
+                File.WriteAllText(PidFilePath, currentPid.ToString());
+                UnityEngine.Debug.Log($"[MCPForUnityBridge] PID file created at {PidFilePath} (PID: {currentPid}).");
+            }
+            catch (Exception ex)
+            {
+                UnityEngine.Debug.LogWarning($"[MCPForUnityBridge] Failed to create PID file: {ex.Message}");
+            }
+        }
+
+        private static void CleanupPidFile()
+        {
+            try
+            {
+                if (File.Exists(PidFilePath))
+                {
+                    File.Delete(PidFilePath);
+                    UnityEngine.Debug.Log("[MCPForUnityBridge] PID file cleaned up.");
+                }
+            }
+            catch (Exception ex)
+            {
+                UnityEngine.Debug.LogWarning($"[MCPForUnityBridge] Failed to delete PID file: {ex.Message}");
+            }
+        }
+
+        private static void CleanupResidualResources()
+        {
+            try
+            {
+                if (File.Exists(PidFilePath))
+                {
+                    UnityEngine.Debug.Log("[MCPForUnityBridge] Found residual PID file. Attempting cleanup.");
+                    try
+                    {
+                        string pidContent = File.ReadAllText(PidFilePath);
+                        if (int.TryParse(pidContent, out int oldPid))
+                        {
+                            TryKillProcess(oldPid);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        UnityEngine.Debug.LogWarning($"[MCPForUnityBridge] Failed to read PID file: {ex.Message}");
+                    }
+
+                    try { File.Delete(PidFilePath); } catch { }
+                }
+
+                var processes = GetProcessesUsingPort(currentUnityPort);
+                if (processes.Count > 0)
+                {
+                    UnityEngine.Debug.Log($"[MCPForUnityBridge] Cleaning up {processes.Count} process(es) occupying port {currentUnityPort}.");
+                    foreach (int pid in processes)
+                    {
+                        TryKillProcess(pid);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                UnityEngine.Debug.LogWarning($"[MCPForUnityBridge] Residual cleanup failed: {ex.Message}");
+            }
+        }
+
+        private static void OnProcessExit(object sender, EventArgs e) => Stop();
+        private static void OnDomainUnload(object sender, EventArgs e) => Stop();
+
+        private static bool TryKillProcess(int pid)
+        {
+            try
+            {
+                using var process = Process.GetProcessById(pid);
+                string processName = process.ProcessName;
+
+                UnityEngine.Debug.Log($"[MCPForUnityBridge] Terminating process {processName} (PID: {pid}).");
+
+                if (!process.CloseMainWindow())
+                {
+                    process.Kill();
+                }
+
+                if (!process.WaitForExit(3000))
+                {
+                    UnityEngine.Debug.LogWarning($"[MCPForUnityBridge] Process {processName} (PID: {pid}) did not exit in time.");
+                    return false;
+                }
+
+                UnityEngine.Debug.Log($"[MCPForUnityBridge] Process {processName} (PID: {pid}) terminated.");
+                return true;
+            }
+            catch (ArgumentException)
+            {
+                UnityEngine.Debug.Log($"[MCPForUnityBridge] Process {pid} no longer exists.");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                UnityEngine.Debug.LogWarning($"[MCPForUnityBridge] Failed to terminate process {pid}: {ex.Message}");
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Attempt to release the specified port by terminating processes currently bound to it.
+        /// </summary>
+        private static bool TryFreePort(int port)
+        {
+            try
+            {
+                UnityEngine.Debug.Log($"[MCPForUnityBridge] Scanning for processes using port {port}...");
+                var processIds = GetProcessesUsingPort(port);
+
+                if (processIds.Count == 0)
+                {
+                    UnityEngine.Debug.Log($"[MCPForUnityBridge] No processes detected on port {port}.");
+                    return true;
+                }
+
+                UnityEngine.Debug.Log($"[MCPForUnityBridge] Found {processIds.Count} process(es) using port {port}: {string.Join(", ", processIds)}");
+
+                bool allKilled = true;
+                foreach (int pid in processIds)
+                {
+                    if (!TryKillProcess(pid))
+                    {
+                        allKilled = false;
+                    }
+                }
+
+                Thread.Sleep(500);
+                var remaining = GetProcessesUsingPort(port);
+                bool portFreed = remaining.Count == 0;
+
+                if (portFreed)
+                {
+                    UnityEngine.Debug.Log($"[MCPForUnityBridge] Port {port} successfully released.");
+                }
+                else
+                {
+                    UnityEngine.Debug.LogWarning($"[MCPForUnityBridge] Port {port} is still used by {remaining.Count} process(es).");
+                }
+
+                return portFreed && allKilled;
+            }
+            catch (Exception ex)
+            {
+                UnityEngine.Debug.LogError($"[MCPForUnityBridge] Error while freeing port {port}: {ex.Message}");
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Returns a list of process IDs that are listening on the specified port.
+        /// Relies on the availability of the 'netstat' command.
+        /// </summary>
+        private static List<int> GetProcessesUsingPort(int port)
+        {
+            var processIds = new List<int>();
+
+            try
+            {
+                var startInfo = new ProcessStartInfo
+                {
+                    FileName = "netstat",
+                    Arguments = "-ano",
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    CreateNoWindow = true
+                };
+
+                using var process = Process.Start(startInfo);
+                if (process == null)
+                {
+                    return processIds;
+                }
+
+                string output = process.StandardOutput.ReadToEnd();
+                process.WaitForExit();
+
+                foreach (var line in output.Split('\n'))
+                {
+                    if (line.IndexOf("LISTENING", StringComparison.OrdinalIgnoreCase) < 0)
+                    {
+                        continue;
+                    }
+
+                    if (line.IndexOf($":{port} ", StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        var parts = line.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                        if (parts.Length >= 5 && int.TryParse(parts[^1], out int pid))
+                        {
+                            if (!processIds.Contains(pid))
+                            {
+                                processIds.Add(pid);
+                            }
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                UnityEngine.Debug.LogWarning($"[MCPForUnityBridge] Unable to inspect processes for port {port}: {ex.Message}");
+            }
+
+            return processIds;
         }
 
         // Heartbeat/status helpers

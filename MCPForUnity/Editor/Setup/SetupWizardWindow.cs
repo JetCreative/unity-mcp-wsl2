@@ -143,6 +143,56 @@ namespace MCPForUnity.Editor.Setup
                 DrawSuccessStatus("System Ready");
                 EditorGUILayout.LabelField("All requirements are met. You can proceed to configure your AI clients.", EditorStyles.wordWrappedLabel);
             }
+
+            EditorGUILayout.Space();
+            if (Application.platform == RuntimePlatform.WindowsEditor)
+            {
+                bool newValue = EditorGUILayout.ToggleLeft(
+                    new GUIContent(
+                        "Run MCP server via WSL",
+                        "Run the MCP server inside Windows Subsystem for Linux. Requires Python and uv installed in your WSL distribution."
+                    ),
+                    McpSettings.RunServerViaWsl
+                );
+
+                if (newValue != McpSettings.RunServerViaWsl)
+                {
+                    McpSettings.RunServerViaWsl = newValue;
+                    if (newValue)
+                    {
+                        ServerInstaller.EnsureServerInstalled();
+                        if (InteropSyncHelper.TryEnsureRegistryLink(out string warning))
+                        {
+                            string linuxPath = McpSettings.GetWslServerLinuxPath();
+                            string registryPath = ServerInstaller.GetWindowsRegistryDirectory();
+                            if (!string.IsNullOrEmpty(linuxPath))
+                            {
+                                EditorUtility.DisplayDialog(
+                                    "WSL Setup Complete",
+                                    $"WSL server files synchronized to:\n{linuxPath}\n\nUnity registry is shared via:\n{registryPath}",
+                                    "OK"
+                                );
+                            }
+                        }
+                        else if (!string.IsNullOrEmpty(warning))
+                        {
+                            EditorUtility.DisplayDialog(
+                                "WSL Setup Warning",
+                                $"{warning}\n\nFollow the instructions above and try enabling WSL mode again.",
+                                "OK"
+                            );
+                        }
+                    }
+                    else
+                    {
+                        InteropSyncHelper.TryEnsureRegistryLink(out _);
+                    }
+                }
+            }
+            else
+            {
+                EditorGUILayout.HelpBox("WSL mode is available only when Unity runs on Windows.", MessageType.Info);
+            }
         }
 
         private void DrawCompleteStep()

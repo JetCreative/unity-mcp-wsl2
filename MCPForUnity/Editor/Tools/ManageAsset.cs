@@ -984,6 +984,32 @@ namespace MCPForUnity.Editor.Tools
                     );
                 }
             }
+            else if (properties["_Color"] is JArray legacyColorArr) // Support payloads that target _Color specifically
+            {
+                try
+                {
+                    if (legacyColorArr.Count >= 3)
+                    {
+                        Color newColor = new Color(
+                            legacyColorArr[0].ToObject<float>(),
+                            legacyColorArr[1].ToObject<float>(),
+                            legacyColorArr[2].ToObject<float>(),
+                            legacyColorArr.Count > 3 ? legacyColorArr[3].ToObject<float>() : 1.0f
+                        );
+                        if (mat.HasProperty("_Color") && mat.GetColor("_Color") != newColor)
+                        {
+                            mat.SetColor("_Color", newColor);
+                            modified = true;
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogWarning(
+                        $"Error parsing color property '_Color': {ex.Message}"
+                    );
+                }
+            }
             // Example: Set float property
             if (properties["float"] is JObject floatProps)
             {
@@ -1412,6 +1438,56 @@ namespace MCPForUnity.Editor.Tools
                 );
                 return null;
             }
+        }
+
+        /// <summary>
+        /// Helper to find a Type by name, searching relevant assemblies.
+        /// Needed for creating ScriptableObjects or finding component types by name.
+        /// </summary>
+        private static Type FindType(string typeName)
+        {
+            if (string.IsNullOrEmpty(typeName))
+                return null;
+
+            // Try direct lookup first (common Unity types often don't need assembly qualified name)
+            var type =
+                Type.GetType(typeName)
+                ?? Type.GetType($"UnityEngine.{typeName}, UnityEngine.CoreModule")
+                ?? Type.GetType($"UnityEngine.UI.{typeName}, UnityEngine.UI")
+                ?? Type.GetType($"UnityEditor.{typeName}, UnityEditor.CoreModule");
+
+            if (type != null)
+                return type;
+
+            // If not found, search loaded assemblies (slower but more robust for user scripts)
+            foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                // Look for non-namespaced first
+                type = assembly.GetType(typeName, false, true); // throwOnError=false, ignoreCase=true
+                if (type != null)
+                    return type;
+
+                // Check common namespaces if simple name given
+                type = assembly.GetType("UnityEngine." + typeName, false, true);
+                if (type != null)
+                    return type;
+                type = assembly.GetType("UnityEditor." + typeName, false, true);
+                if (type != null)
+                    return type;
+                // Add other likely namespaces if needed (e.g., specific plugins)
+
+                type = assembly.GetType("ET." + typeName, false, true);
+                if (type != null) return type;
+
+                type = assembly.GetType("ET.Client." + typeName, false, true);
+                if (type != null) return type;
+
+                type = assembly.GetType("ET.Server." + typeName, false, true);
+                if (type != null) return type;
+            }
+
+            Debug.LogWarning($"[FindType] Type '{typeName}' not found in any loaded assembly.");
+            return null; // Not found
         }
 
 

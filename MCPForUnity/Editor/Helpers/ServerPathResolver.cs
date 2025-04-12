@@ -70,16 +70,45 @@ namespace MCPForUnity.Editor.Helpers
                             return true;
                         }
                     }
-                }
-#endif
             }
-            catch { /* ignore */ }
+#endif
+        }
+        catch { /* ignore */ }
 
-            // 3) Fallback to previous common install locations
-            try
+        // 2b) Asset Store installs copy UnityMcpServer~ under the project Assets folder
+#if UNITY_EDITOR
+        try
+        {
+            string assetsRoot = Application.dataPath;
+            if (!string.IsNullOrEmpty(assetsRoot))
             {
-                string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile) ?? string.Empty;
-                string[] candidates =
+                string repoEmbedded = Path.Combine(assetsRoot, "unity-mcp-wsl2", "MCPForUnity", "UnityMcpServer~", "src");
+                if (Directory.Exists(repoEmbedded) && File.Exists(Path.Combine(repoEmbedded, "server.py")))
+                {
+                    srcPath = repoEmbedded;
+                    return true;
+                }
+
+                string assetEmbedded = Path.Combine(assetsRoot, "MCP", "UnityMcpServer~", "src");
+                if (Directory.Exists(assetEmbedded) && File.Exists(Path.Combine(assetEmbedded, "server.py")))
+                {
+                    srcPath = assetEmbedded;
+                    return true;
+                }
+            }
+        }
+#pragma warning disable CS0168
+        catch
+        {
+            // Ignore, fall through to other strategies
+        }
+#endif
+
+        // 3) Fallback to previous common install locations
+        try
+        {
+            string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile) ?? string.Empty;
+            string[] candidates =
                 {
                     Path.Combine(home, "unity-mcp", "UnityMcpServer", "src"),
                     Path.Combine(home, "Applications", "UnityMCP", "UnityMcpServer", "src"),

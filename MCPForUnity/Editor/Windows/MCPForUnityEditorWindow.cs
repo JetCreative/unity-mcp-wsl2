@@ -26,6 +26,7 @@ namespace MCPForUnity.Editor.Windows
         // Settings UI Elements
         private Label versionLabel;
         private Toggle debugLogsToggle;
+        private Toggle wslModeToggle;
         private EnumField validationLevelField;
         private Label validationDescription;
         private Foldout advancedSettingsFoldout;
@@ -166,6 +167,8 @@ namespace MCPForUnity.Editor.Windows
 
         private void RefreshAllData()
         {
+            UpdateWslToggleState();
+
             // Update connection status
             UpdateConnectionStatus();
 
@@ -194,6 +197,7 @@ namespace MCPForUnity.Editor.Windows
             // Settings
             versionLabel = rootVisualElement.Q<Label>("version-label");
             debugLogsToggle = rootVisualElement.Q<Toggle>("debug-logs-toggle");
+            wslModeToggle = rootVisualElement.Q<Toggle>("wsl-mode-toggle");
             validationLevelField = rootVisualElement.Q<EnumField>("validation-level");
             validationDescription = rootVisualElement.Q<Label>("validation-description");
             advancedSettingsFoldout = rootVisualElement.Q<Foldout>("advanced-settings-foldout");
@@ -244,6 +248,7 @@ namespace MCPForUnity.Editor.Windows
             // Settings Section
             UpdateVersionLabel();
             debugLogsToggle.value = EditorPrefs.GetBool("MCPForUnity.DebugLogs", false);
+            UpdateWslToggleState();
 
             validationLevelField.Init(ValidationLevel.Standard);
             int savedLevel = EditorPrefs.GetInt("MCPForUnity.ValidationLevel", 1);
@@ -276,6 +281,24 @@ namespace MCPForUnity.Editor.Windows
             claudeCliPathRow.style.display = DisplayStyle.None;
         }
 
+        private void UpdateWslToggleState()
+        {
+            if (wslModeToggle == null) return;
+
+            bool isWindowsEditor = Application.platform == RuntimePlatform.WindowsEditor;
+            wslModeToggle.SetEnabled(isWindowsEditor);
+
+            if (!isWindowsEditor)
+            {
+                wslModeToggle.tooltip = "WSL mode is only available when running Unity on Windows.";
+                wslModeToggle.SetValueWithoutNotify(false);
+                return;
+            }
+
+            wslModeToggle.tooltip = "Run the MCP server through Windows Subsystem for Linux. Requires WSL with Python and uv installed.";
+            wslModeToggle.SetValueWithoutNotify(McpSettings.RunServerViaWsl);
+        }
+
         private void RegisterCallbacks()
         {
             // Settings callbacks
@@ -283,6 +306,52 @@ namespace MCPForUnity.Editor.Windows
             {
                 EditorPrefs.SetBool("MCPForUnity.DebugLogs", evt.newValue);
             });
+
+            if (wslModeToggle != null)
+            {
+                wslModeToggle.RegisterValueChangedCallback(evt =>
+                {
+                    if (Application.platform != RuntimePlatform.WindowsEditor)
+                    {
+                        wslModeToggle.SetValueWithoutNotify(false);
+                        return;
+                    }
+
+                    McpSettings.RunServerViaWsl = evt.newValue;
+
+                    if (evt.newValue)
+                    {
+                        ServerInstaller.EnsureServerInstalled();
+                        if (InteropSyncHelper.TryEnsureRegistryLink(out string warning))
+                        {
+                            string linuxPath = McpSettings.GetWslServerLinuxPath();
+                            string registryPath = ServerInstaller.GetWindowsRegistryDirectory();
+                            if (!string.IsNullOrEmpty(linuxPath))
+                            {
+                                EditorUtility.DisplayDialog(
+                                    "WSL Setup Complete",
+                                    $"WSL server files synchronized to:\n{linuxPath}\n\nUnity registry is shared via:\n{registryPath}",
+                                    "OK"
+                                );
+                            }
+                        }
+                        else if (!string.IsNullOrEmpty(warning))
+                        {
+                            EditorUtility.DisplayDialog(
+                                "WSL Setup Warning",
+                                $"{warning}\n\nFollow the instructions above and try enabling WSL mode again.",
+                                "OK"
+                            );
+                        }
+                    }
+                    else
+                    {
+                        InteropSyncHelper.TryEnsureRegistryLink(out _);
+                    }
+
+                    UpdateServerStatusBanner();
+                });
+            }
 
             validationLevelField.RegisterValueChangedCallback(evt =>
             {
@@ -625,6 +694,18 @@ namespace MCPForUnity.Editor.Windows
 
         private void UpdateServerStatusBanner()
         {
+            if (Application.platform == RuntimePlatform.WindowsEditor && McpSettings.RunServerViaWsl)
+            {
+                if (!InteropSyncHelper.TryEnsureRegistryLink(out string wslWarning))
+                {
+                    serverStatusMessage.text = $"\u26A0 {wslWarning}";
+                    serverStatusBanner.style.display = DisplayStyle.Flex;
+                    downloadServerButton.style.display = DisplayStyle.Flex;
+                    rebuildServerButton.style.display = DisplayStyle.Flex;
+                    return;
+                }
+            }
+
             bool hasEmbedded = ServerInstaller.HasEmbeddedServer();
             string installedVer = ServerInstaller.GetInstalledServerVersion();
             string packageVer = AssetPathUtility.GetPackageVersion();
@@ -638,7 +719,7 @@ namespace MCPForUnity.Editor.Windows
             else
             {
                 downloadServerButton.style.display = DisplayStyle.Flex;
-                rebuildServerButton.style.display = DisplayStyle.None;
+                rebuildServerButton.style.display = DisplayStyle.Flex;
             }
 
             // Check for installation errors first
