@@ -1,3 +1,8 @@
+from bootstrap_shared_server import ensure_shared_server_on_path
+
+# Ensure we load the shared server implementation instead of a stale local fork.
+ensure_shared_server_on_path()
+
 from telemetry import record_telemetry, record_milestone, RecordType, MilestoneType
 from fastmcp import FastMCP
 import logging

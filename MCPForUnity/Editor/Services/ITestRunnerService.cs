@@ -5,7 +5,7 @@ using UnityEditor.TestTools.TestRunner.Api;
 namespace MCPForUnity.Editor.Services
 {
     /// <summary>
-    /// Provides access to Unity Test Runner data and execution.
+    /// Provides access to Unity Test Runner data, scheduling, and status tracking.
     /// </summary>
     public interface ITestRunnerService
     {
@@ -16,8 +16,31 @@ namespace MCPForUnity.Editor.Services
         Task<IReadOnlyList<Dictionary<string, string>>> GetTestsAsync(TestMode? mode);
 
         /// <summary>
-        /// Execute tests for the supplied mode.
+        /// Schedule a Unity test run using the supplied request payload.
+        /// Returns a handle that can be awaited for completion or polled via status APIs.
         /// </summary>
-        Task<TestRunResult> RunTestsAsync(TestMode mode);
+        TestRunHandle StartRun(TestRunRequest request);
+
+        /// <summary>
+        /// Retrieve the latest status snapshot for the supplied run id.
+        /// If <paramref name="runId"/> is null, the active run (or most recent completed run) is used.
+        /// </summary>
+        bool TryGetStatus(string runId, out TestRunStatusSnapshot status);
+
+        /// <summary>
+        /// Attempt to cancel the specified run (or the active run when runId is null).
+        /// Returns true when Unity accepts the cancel request, false otherwise.
+        /// </summary>
+        bool TryCancelRun(string runId, out string error);
+
+        /// <summary>
+        /// Retrieve failed tests for the specified run id (or the latest completed run when null).
+        /// </summary>
+        IReadOnlyList<TestRunTestResult> GetFailedTests(string runId = null);
+
+        /// <summary>
+        /// Retrieve the cached results for a completed run.
+        /// </summary>
+        bool TryGetResult(string runId, out TestRunResult result);
     }
 }

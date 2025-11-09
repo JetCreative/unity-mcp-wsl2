@@ -150,6 +150,17 @@ For complete documentation, troubleshooting, and advanced usage:
 - **Unity Editor:** 2021.3 LTS or newer
 - **uv:** Python package manager ([Installation Guide](https://docs.astral.sh/uv/getting-started/installation/))
 
+## Shared source bootstrap
+
+When this server is launched from WSL, it now attempts to reuse the canonical Windows install (or any path listed in `UNITY_MCP_SERVER_PATH`) instead of running a stale fork. The lookup order mirrors the Unity plugin:
+
+1. Paths supplied via the `UNITY_MCP_SERVER_PATH` environment variable (semicolon/colon separated)
+2. `%USERPROFILE%\AppData\Local\UnityMCP\UnityMcpServer\src` (accessible through `/mnt/c/Users/<you>/...` inside WSL)
+3. `~/.config/UnityMCP/UnityMcpServer/src` and `~/.local/share/UnityMCP/UnityMcpServer/src`
+4. The embedded repo copy under `Assets/MCP/UnityMcpServer~/src`
+
+This keeps Windows and WSL perfectly in sync while still allowing fully offline development by falling back to the bundled sources.
+
 ---
 
 ## License

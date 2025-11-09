@@ -153,6 +153,17 @@ To find it reliably:
 
 Note: In recent builds, the Python server sources are also bundled inside the package under `UnityMcpServer~/src`. This is handy for local testing or pointing MCP clients directly at the packaged server.
 
+### Shared server bootstrap (WSL relay)
+
+The `Assets/unity-mcp-wsl2/Server` entry point no longer carries its own copy of the MCP server. Instead, it bootstraps the first available authoritative install and simply relays requests to it. The resolution order is:
+
+1. `UNITY_MCP_SERVER_PATH` (semicolon/colon separated list)
+2. `%USERPROFILE%\AppData\Local\UnityMCP\UnityMcpServer\src` (surfaced via `/mnt/c/Users/<user>/...`)
+3. `~/.config/UnityMCP/UnityMcpServer/src` and `~/.local/share/UnityMCP/UnityMcpServer/src`
+4. The repo `Assets/MCP/UnityMcpServer~/src` copy (falls back to the bundled helper if nothing else is found)
+
+If you're iterating inside WSL but running Unity on Windows, set `UNITY_MCP_SERVER_PATH=/mnt/c/Users/<you>/AppData/Local/UnityMCP/UnityMcpServer/src` (or let the auto-detection pick it up) and both environments will share the same Python sources automatically.
+
 ## MCP Bridge Stress Test
 
 An on-demand stress utility exercises the MCP bridge with multiple concurrent clients while triggering real script reloads via immediate script edits (no menu calls required).

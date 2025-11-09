@@ -91,6 +91,38 @@
     white-space: normal;
 }
 
+/* Python Tools helper styles */
+.python-tools-message {
+    padding: 8px;
+    margin-bottom: 4px;
+    background-color: rgba(46, 163, 255, 0.08);
+    border-left-width: 3px;
+    border-left-color: rgba(46, 163, 255, 0.9);
+    white-space: normal;
+    min-height: 0;
+}
+
+.python-tools-message.warning {
+    background-color: rgba(255, 153, 0, 0.1);
+    border-left-color: rgba(255, 153, 0, 0.9);
+}
+
+.python-tools-hint {
+    font-size: 11px;
+    color: rgba(150, 150, 150, 1);
+    margin-bottom: 8px;
+    white-space: normal;
+}
+
+.button-row {
+    flex-direction: row;
+    align-items: center;
+}
+
+.button-row > Button {
+    margin-right: 6px;
+}
+
 /* Port Fields */
 .port-field {
     width: 100px;

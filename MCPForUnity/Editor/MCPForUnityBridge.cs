@@ -137,6 +137,11 @@ namespace MCPForUnity.Editor
 
         static MCPForUnityBridge()
         {
+            if (Application.isBatchMode)
+            {
+                // Asset import worker or other headless context; skip bridge setup entirely.
+                return;
+            }
             // Record the main thread ID for safe thread checks
             try { mainThreadId = Thread.CurrentThread.ManagedThreadId; } catch { mainThreadId = 0; }
             // Start single writer thread for framed responses

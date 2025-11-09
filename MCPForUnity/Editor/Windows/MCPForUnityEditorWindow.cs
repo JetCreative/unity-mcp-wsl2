@@ -38,6 +38,10 @@ namespace MCPForUnity.Editor.Windows
         private Button clearUvButton;
         private VisualElement mcpServerPathStatus;
         private VisualElement uvPathStatus;
+        private Label pythonToolsStatusLabel;
+        private Label pythonToolsHintLabel;
+        private Button createPythonToolsButton;
+        private Button openPythonToolsButton;
 
         // Connection UI Elements
         private EnumField protocolDropdown;
@@ -75,6 +79,7 @@ namespace MCPForUnity.Editor.Windows
         private readonly McpClients mcpClients = new();
         private int selectedClientIndex = 0;
         private ValidationLevel currentValidationLevel = ValidationLevel.Standard;
+        private PythonToolsAsset primaryPythonToolsAsset;
 
         // Validation levels matching the existing enum
         private enum ValidationLevel
@@ -135,6 +140,7 @@ namespace MCPForUnity.Editor.Windows
             // Technically not required to connect, but if we don't do this, the UI will be blank
             UpdateManualConfiguration();
             UpdateClaudeCliPathVisibility();
+            UpdatePythonToolsUI();
         }
 
         private void OnEnable()
@@ -175,7 +181,7 @@ namespace MCPForUnity.Editor.Windows
             // Auto-verify bridge health if connected
             if (MCPServiceLocator.Bridge.IsRunning)
             {
-                VerifyBridgeConnection();
+                VerifyBridgeConnection(logToConsole: false);
             }
 
             // Update path overrides
@@ -190,6 +196,8 @@ namespace MCPForUnity.Editor.Windows
                 UpdateManualConfiguration();
                 UpdateClaudeCliPathVisibility();
             }
+
+            UpdatePythonToolsUI();
         }
 
         private void CacheUIElements()
@@ -241,6 +249,12 @@ namespace MCPForUnity.Editor.Windows
             configJsonField = rootVisualElement.Q<TextField>("config-json");
             copyJsonButton = rootVisualElement.Q<Button>("copy-json-button");
             installationStepsLabel = rootVisualElement.Q<Label>("installation-steps");
+
+            // Python tools
+            pythonToolsStatusLabel = rootVisualElement.Q<Label>("python-tools-status");
+            pythonToolsHintLabel = rootVisualElement.Q<Label>("python-tools-hint");
+            createPythonToolsButton = rootVisualElement.Q<Button>("create-python-tools-button");
+            openPythonToolsButton = rootVisualElement.Q<Button>("open-python-tools-button");
         }
 
         private void InitializeUI()
@@ -387,6 +401,16 @@ namespace MCPForUnity.Editor.Windows
             copyPathButton.clicked += OnCopyPathClicked;
             openFileButton.clicked += OnOpenFileClicked;
             copyJsonButton.clicked += OnCopyJsonClicked;
+
+            if (createPythonToolsButton != null)
+            {
+                createPythonToolsButton.clicked += HandleCreatePythonToolsAsset;
+            }
+
+            if (openPythonToolsButton != null)
+            {
+                openPythonToolsButton.clicked += HandleOpenPythonToolsAsset;
+            }
         }
 
         private void UpdateValidationDescription()
@@ -584,6 +608,126 @@ namespace MCPForUnity.Editor.Windows
             }
         }
 
+        private void UpdatePythonToolsUI()
+        {
+            if (pythonToolsStatusLabel == null)
+            {
+                return;
+            }
+
+            var registries = MCPServiceLocator.PythonToolRegistry.GetAllRegistries().ToList();
+            primaryPythonToolsAsset = registries.FirstOrDefault();
+            bool hasAsset = primaryPythonToolsAsset != null;
+
+            if (hasAsset)
+            {
+                string assetPath = AssetDatabase.GetAssetPath(primaryPythonToolsAsset);
+                pythonToolsStatusLabel.text = $"PythonToolsAsset: {primaryPythonToolsAsset.name} ({assetPath})";
+                if (pythonToolsHintLabel != null)
+                {
+                    pythonToolsHintLabel.text = "Add .py files to the asset's Python Files list to sync custom MCP tools.";
+                }
+            }
+            else
+            {
+                pythonToolsStatusLabel.text = "No PythonToolsAsset found. Custom Python MCP tools cannot sync yet.";
+                if (pythonToolsHintLabel != null)
+                {
+                    pythonToolsHintLabel.text = "Click \"Create Python Tools Asset\" (or use Assets > Create > MCP For Unity > Python Tools) to generate one.";
+                }
+            }
+
+            pythonToolsStatusLabel.EnableInClassList("warning", !hasAsset);
+
+            if (createPythonToolsButton != null)
+            {
+                createPythonToolsButton.text = hasAsset
+                    ? "Create Another Python Tools Asset"
+                    : "Create Python Tools Asset";
+            }
+
+            SetElementDisplay(openPythonToolsButton, hasAsset ? DisplayStyle.Flex : DisplayStyle.None);
+        }
+
+        private void HandleCreatePythonToolsAsset()
+        {
+            var asset = CreatePythonToolsAsset();
+            if (asset != null)
+            {
+                Selection.activeObject = asset;
+                EditorGUIUtility.PingObject(asset);
+            }
+        }
+
+        private void HandleOpenPythonToolsAsset()
+        {
+            if (primaryPythonToolsAsset == null)
+            {
+                UpdatePythonToolsUI();
+                return;
+            }
+
+            Selection.activeObject = primaryPythonToolsAsset;
+            EditorGUIUtility.PingObject(primaryPythonToolsAsset);
+        }
+
+        private PythonToolsAsset CreatePythonToolsAsset()
+        {
+            try
+            {
+                const string defaultFolder = "Assets/MCPForUnity";
+                EnsureFolderExists(defaultFolder);
+                string assetPath = AssetDatabase.GenerateUniqueAssetPath($"{defaultFolder}/PythonTools.asset");
+                var asset = ScriptableObject.CreateInstance<PythonToolsAsset>();
+                AssetDatabase.CreateAsset(asset, assetPath);
+                AssetDatabase.SaveAssets();
+                AssetDatabase.Refresh();
+                McpLog.Info($"Created PythonToolsAsset at {assetPath}");
+                UpdatePythonToolsUI();
+                return asset;
+            }
+            catch (Exception ex)
+            {
+                McpLog.Error($"Failed to create PythonToolsAsset: {ex.Message}");
+                EditorUtility.DisplayDialog("MCP For Unity", $"Failed to create PythonToolsAsset: {ex.Message}", "OK");
+                return null;
+            }
+        }
+
+        private static void EnsureFolderExists(string assetFolderPath)
+        {
+            if (string.IsNullOrEmpty(assetFolderPath))
+            {
+                return;
+            }
+
+            assetFolderPath = assetFolderPath.Replace("\\", "/");
+            if (AssetDatabase.IsValidFolder(assetFolderPath))
+            {
+                return;
+            }
+
+            string parent = Path.GetDirectoryName(assetFolderPath)?.Replace("\\", "/");
+            if (!string.IsNullOrEmpty(parent) && !AssetDatabase.IsValidFolder(parent))
+            {
+                EnsureFolderExists(parent);
+            }
+
+            string folderName = Path.GetFileName(assetFolderPath);
+            if (!string.IsNullOrEmpty(parent) && !string.IsNullOrEmpty(folderName) && !AssetDatabase.IsValidFolder(assetFolderPath))
+            {
+                AssetDatabase.CreateFolder(parent, folderName);
+            }
+        }
+
+        private static void SetElementDisplay(VisualElement element, DisplayStyle style)
+        {
+            if (element != null)
+            {
+                element.style.display = style;
+            }
+        }
+
         // Button callbacks
         private void OnConnectionToggleClicked()
         {
@@ -615,7 +759,7 @@ namespace MCPForUnity.Editor.Windows
             VerifyBridgeConnection();
         }
 
-        private void VerifyBridgeConnection()
+        private void VerifyBridgeConnection(bool logToConsole = true)
         {
             var bridgeService = MCPServiceLocator.Bridge;
 
@@ -625,7 +769,10 @@ namespace MCPForUnity.Editor.Windows
                 healthIndicator.RemoveFromClassList("healthy");
                 healthIndicator.RemoveFromClassList("warning");
                 healthIndicator.AddToClassList("unknown");
-                McpLog.Warn("Cannot verify connection: Bridge is not running");
+                if (logToConsole)
+                {
+                    McpLog.Warn("Cannot verify connection: Bridge is not running");
+                }
                 return;
             }
 
@@ -639,19 +786,28 @@ namespace MCPForUnity.Editor.Windows
             {
                 healthStatusLabel.text = "Healthy";
                 healthIndicator.AddToClassList("healthy");
-                McpLog.Info("Bridge verification successful");
+                if (logToConsole)
+                {
+                    McpLog.Info("Bridge verification successful");
+                }
             }
             else if (result.HandshakeValid)
             {
                 healthStatusLabel.text = "Ping Failed";
                 healthIndicator.AddToClassList("warning");
-                McpLog.Warn($"Bridge verification warning: {result.Message}");
+                if (logToConsole)
+                {
+                    McpLog.Warn($"Bridge verification warning: {result.Message}");
+                }
             }
             else
             {
                 healthStatusLabel.text = "Unhealthy";
                 healthIndicator.AddToClassList("warning");
-                McpLog.Error($"Bridge verification failed: {result.Message}");
+                if (logToConsole)
+                {
+                    McpLog.Error($"Bridge verification failed: {result.Message}");
+                }
             }
         }
 

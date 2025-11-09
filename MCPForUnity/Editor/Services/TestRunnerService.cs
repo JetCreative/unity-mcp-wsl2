@@ -5,6 +5,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using MCPForUnity.Editor.Helpers;
 using UnityEditor;
+using UnityEditor.Compilation;
 using UnityEditor.TestTools.TestRunner.Api;
 using UnityEngine;
 
@@ -21,7 +22,14 @@ namespace MCPForUnity.Editor.Services
         private readonly TestRunnerApi _testRunnerApi;
         private readonly SemaphoreSlim _operationLock = new SemaphoreSlim(1, 1);
         private readonly List<ITestResultAdaptor> _leafResults = new List<ITestResultAdaptor>();
+        private readonly object _stateLock = new object();
+        private readonly Dictionary<string, ManagedTestRun> _runHistory = new Dictionary<string, ManagedTestRun>(StringComparer.Ordinal);
+        private readonly Queue<string> _runOrder = new Queue<string>();
         private TaskCompletionSource<TestRunResult> _runCompletionSource;
+        private ManagedTestRun _activeRun;
+        private ManagedTestRun _lastCompletedRun;
+
+        private const int RunHistoryLimit = 10;
 
         public TestRunnerService()
         {
@@ -56,39 +64,143 @@ namespace MCPForUnity.Editor.Services
             }
         }
 
-        public async Task<TestRunResult> RunTestsAsync(TestMode mode)
+        public TestRunHandle StartRun(TestRunRequest request)
         {
-            await _operationLock.WaitAsync().ConfigureAwait(false);
-            Task<TestRunResult> runTask;
+            if (request == null)
+            {
+                throw new ArgumentNullException(nameof(request));
+            }
+
+            _operationLock.Wait();
             try
             {
                 if (_runCompletionSource != null && !_runCompletionSource.Task.IsCompleted)
                 {
-                    throw new InvalidOperationException("A Unity test run is already in progress.");
+                    ManagedTestRun existing;
+                    lock (_stateLock)
+                    {
+                        existing = _activeRun;
+                    }
+
+                    if (existing == null || string.IsNullOrEmpty(existing.RunId))
+                    {
+                        throw new InvalidOperationException("A Unity test run is already in progress, but its identifier is unavailable.");
+                    }
+
+                    return new TestRunHandle(existing.RunId, false, _runCompletionSource.Task);
+                }
+
+                if (EditorApplication.isCompiling)
+                {
+                    throw new InvalidOperationException("Unity is still compiling scripts. Wait for compilation to finish before running tests.");
                 }
 
                 _leafResults.Clear();
                 _runCompletionSource = new TaskCompletionSource<TestRunResult>(TaskCreationOptions.RunContinuationsAsynchronously);
 
-                var filter = new Filter { testMode = mode };
-                _testRunnerApi.Execute(new ExecutionSettings(filter));
+                var filter = BuildFilter(request);
+                var executionSettings = new ExecutionSettings(filter)
+                {
+                    filters = new[] { filter }
+                };
 
-                runTask = _runCompletionSource.Task;
-            }
-            catch
-            {
-                _operationLock.Release();
-                throw;
-            }
+                try
+                {
+                    string runGuid = _testRunnerApi.Execute(executionSettings);
+                    var managedRun = new ManagedTestRun(runGuid, request);
 
-            try
-            {
-                return await runTask.ConfigureAwait(true);
+                    lock (_stateLock)
+                    {
+                        _activeRun = managedRun;
+                        _runHistory[runGuid] = managedRun;
+                        _runOrder.Enqueue(runGuid);
+                        TrimHistory();
+                    }
+
+                    return new TestRunHandle(runGuid, true, _runCompletionSource.Task);
+                }
+                catch
+                {
+                    _runCompletionSource = null;
+                    throw;
+                }
             }
             finally
             {
                 _operationLock.Release();
             }
+        }
+
+        public bool TryGetStatus(string runId, out TestRunStatusSnapshot status)
+        {
+            var run = ResolveRun(runId, string.IsNullOrEmpty(runId));
+            if (run == null)
+            {
+                status = null;
+                return false;
+            }
+
+            status = CreateSnapshot(run);
+            return true;
+        }
+
+        public bool TryCancelRun(string runId, out string error)
+        {
+            error = null;
+            var run = ResolveRun(runId, string.IsNullOrEmpty(runId));
+            if (run == null)
+            {
+                error = string.IsNullOrEmpty(runId)
+                    ? "No active test run to cancel."
+                    : $"Test run '{runId}' not found.";
+                return false;
+            }
+
+            if (run.State == TestRunState.Completed || run.State == TestRunState.Failed || run.State == TestRunState.Canceled)
+            {
+                error = $"Test run '{run.RunId}' already finished.";
+                return false;
+            }
+
+            bool accepted = TestRunnerApi.CancelTestRun(run.RunId);
+            if (!accepted)
+            {
+                error = $"Unity rejected cancel request for run '{run.RunId}'.";
+                return false;
+            }
+
+            lock (_stateLock)
+            {
+                run.State = TestRunState.Cancelling;
+            }
+
+            return true;
+        }
+
+        public IReadOnlyList<TestRunTestResult> GetFailedTests(string runId = null)
+        {
+            var run = ResolveRun(runId, string.IsNullOrEmpty(runId));
+            if (run?.Result == null)
+            {
+                return Array.Empty<TestRunTestResult>();
+            }
+
+            return run.Result.Results
+                .Where(r => string.Equals(r.State, "Failed", StringComparison.OrdinalIgnoreCase))
+                .ToList();
+        }
+
+        public bool TryGetResult(string runId, out TestRunResult result)
+        {
+            var run = ResolveRun(runId, string.IsNullOrEmpty(runId));
+            if (run?.Result == null)
+            {
+                result = null;
+                return false;
+            }
+
+            result = run.Result;
+            return true;
         }
 
         public void Dispose()
@@ -115,6 +227,14 @@ namespace MCPForUnity.Editor.Services
         public void RunStarted(ITestAdaptor testsToRun)
         {
             _leafResults.Clear();
+            lock (_stateLock)
+            {
+                if (_activeRun != null)
+                {
+                    _activeRun.State = TestRunState.Running;
+                    _activeRun.StartTimeUtc = DateTime.UtcNow;
+                }
+            }
         }
 
         public void RunFinished(ITestResultAdaptor result)
@@ -124,9 +244,28 @@ namespace MCPForUnity.Editor.Services
                 return;
             }
 
-            var payload = TestRunResult.Create(result, _leafResults);
+            ManagedTestRun run;
+            lock (_stateLock)
+            {
+                run = _activeRun;
+            }
+
+            var payload = TestRunResult.Create(run?.RunId ?? string.Empty, run?.Request.Mode ?? TestMode.EditMode, result, _leafResults);
             _runCompletionSource.TrySetResult(payload);
             _runCompletionSource = null;
+
+            if (run != null)
+            {
+                run.Result = payload;
+                run.EndTimeUtc = DateTime.UtcNow;
+                run.State = MapState(payload);
+
+                lock (_stateLock)
+                {
+                    _lastCompletedRun = run;
+                    _activeRun = null;
+                }
+            }
         }
 
         public void TestStarted(ITestAdaptor test)
@@ -145,6 +284,103 @@ namespace MCPForUnity.Editor.Services
             {
                 _leafResults.Add(result);
             }
+        }
+
+        private ManagedTestRun ResolveRun(string runId, bool allowFallback)
+        {
+            lock (_stateLock)
+            {
+                if (!string.IsNullOrEmpty(runId) && _runHistory.TryGetValue(runId, out var specified))
+                {
+                    return specified;
+                }
+
+                if (!allowFallback)
+                {
+                    return null;
+                }
+
+                return _activeRun ?? _lastCompletedRun;
+            }
+        }
+
+        private void TrimHistory()
+        {
+            while (_runOrder.Count > RunHistoryLimit)
+            {
+                var oldest = _runOrder.Dequeue();
+                if (_activeRun != null && string.Equals(_activeRun.RunId, oldest, StringComparison.Ordinal))
+                {
+                    // Skip removal for the currently running entry; it will be trimmed on next pass.
+                    continue;
+                }
+
+                _runHistory.Remove(oldest);
+            }
+        }
+
+        private static Filter BuildFilter(TestRunRequest request)
+        {
+            return new Filter
+            {
+                testMode = request.Mode,
+                testNames = ToArrayOrNull(request.TestNames),
+                groupNames = ToArrayOrNull(request.GroupNames),
+                categoryNames = ToArrayOrNull(request.CategoryNames),
+                assemblyNames = ToArrayOrNull(request.AssemblyNames),
+            };
+        }
+
+        private static string[] ToArrayOrNull(IReadOnlyList<string> values)
+        {
+            if (values == null || values.Count == 0)
+            {
+                return null;
+            }
+
+            var filtered = values
+                .Where(v => !string.IsNullOrWhiteSpace(v))
+                .Distinct(StringComparer.Ordinal)
+                .ToArray();
+
+            return filtered.Length == 0 ? null : filtered;
+        }
+
+        private static TestRunState MapState(TestRunResult result)
+        {
+            if (result == null)
+            {
+                return TestRunState.Faulted;
+            }
+
+            var state = result.Summary?.ResultState;
+            if (string.Equals(state, "Failed", StringComparison.OrdinalIgnoreCase))
+            {
+                return TestRunState.Failed;
+            }
+
+            if (string.Equals(state, "Cancelled", StringComparison.OrdinalIgnoreCase) || string.Equals(state, "Canceled", StringComparison.OrdinalIgnoreCase))
+            {
+                return TestRunState.Canceled;
+            }
+
+            if (string.Equals(state, "Passed", StringComparison.OrdinalIgnoreCase))
+            {
+                return TestRunState.Completed;
+            }
+
+            return TestRunState.Completed;
+        }
+
+        private static TestRunStatusSnapshot CreateSnapshot(ManagedTestRun run)
+        {
+            return new TestRunStatusSnapshot(
+                run.RunId,
+                run.Request.Mode,
+                run.State,
+                run.StartTimeUtc,
+                run.EndTimeUtc,
+                run.Result?.Summary);
         }
 
         #endregion
@@ -233,6 +469,24 @@ namespace MCPForUnity.Editor.Services
         }
 
         #endregion
+
+        private sealed class ManagedTestRun
+        {
+            internal ManagedTestRun(string runId, TestRunRequest request)
+            {
+                RunId = runId;
+                Request = request;
+                StartTimeUtc = DateTime.UtcNow;
+                State = TestRunState.Queued;
+            }
+
+            public string RunId { get; }
+            public TestRunRequest Request { get; }
+            public DateTime StartTimeUtc { get; set; }
+            public DateTime? EndTimeUtc { get; set; }
+            public TestRunState State { get; set; }
+            public TestRunResult Result { get; set; }
+        }
     }
 
     /// <summary>
@@ -240,12 +494,16 @@ namespace MCPForUnity.Editor.Services
     /// </summary>
     public sealed class TestRunResult
     {
-        internal TestRunResult(TestRunSummary summary, IReadOnlyList<TestRunTestResult> results)
+        internal TestRunResult(string runId, TestMode mode, TestRunSummary summary, IReadOnlyList<TestRunTestResult> results)
         {
+            RunId = runId;
+            Mode = mode;
             Summary = summary;
             Results = results;
         }
 
+        public string RunId { get; }
+        public TestMode Mode { get; }
         public TestRunSummary Summary { get; }
         public IReadOnlyList<TestRunTestResult> Results { get; }
 
@@ -254,17 +512,18 @@ namespace MCPForUnity.Editor.Services
         public int Failed => Summary.Failed;
         public int Skipped => Summary.Skipped;
 
-        public object ToSerializable(string mode)
+        public object ToSerializable()
         {
             return new
             {
-                mode,
+                runId = RunId,
+                mode = Mode.ToString(),
                 summary = Summary.ToSerializable(),
                 results = Results.Select(r => r.ToSerializable()).ToList(),
             };
         }
 
-        internal static TestRunResult Create(ITestResultAdaptor summary, IReadOnlyList<ITestResultAdaptor> tests)
+        internal static TestRunResult Create(string runId, TestMode mode, ITestResultAdaptor summary, IReadOnlyList<ITestResultAdaptor> tests)
         {
             var materializedTests = tests.Select(TestRunTestResult.FromAdaptor).ToList();
 
@@ -288,7 +547,7 @@ namespace MCPForUnity.Editor.Services
                 duration,
                 summary?.ResultState ?? "Unknown");
 
-            return new TestRunResult(summaryPayload, materializedTests);
+            return new TestRunResult(runId, mode, summaryPayload, materializedTests);
         }
     }
 
@@ -383,5 +642,101 @@ namespace MCPForUnity.Editor.Services
                 adaptor.StackTrace,
                 adaptor.Output);
         }
+    }
+    
+    public sealed class TestRunHandle
+    {
+        internal TestRunHandle(string runId, bool startedNewRun, Task<TestRunResult> completionTask)
+        {
+            RunId = runId;
+            StartedNewRun = startedNewRun;
+            CompletionTask = completionTask ?? throw new ArgumentNullException(nameof(completionTask));
+        }
+
+        public string RunId { get; }
+        public bool StartedNewRun { get; }
+        public Task<TestRunResult> CompletionTask { get; }
+    }
+
+    public sealed class TestRunRequest
+    {
+        public TestRunRequest(
+            TestMode mode,
+            IReadOnlyList<string> testNames = null,
+            IReadOnlyList<string> groupNames = null,
+            IReadOnlyList<string> categoryNames = null,
+            IReadOnlyList<string> assemblyNames = null)
+        {
+            Mode = mode;
+            TestNames = testNames;
+            GroupNames = groupNames;
+            CategoryNames = categoryNames;
+            AssemblyNames = assemblyNames;
+        }
+
+        public TestMode Mode { get; }
+        public IReadOnlyList<string> TestNames { get; }
+        public IReadOnlyList<string> GroupNames { get; }
+        public IReadOnlyList<string> CategoryNames { get; }
+        public IReadOnlyList<string> AssemblyNames { get; }
+    }
+
+    public sealed class TestRunStatusSnapshot
+    {
+        internal TestRunStatusSnapshot(
+            string runId,
+            TestMode mode,
+            TestRunState state,
+            DateTime startUtc,
+            DateTime? endUtc,
+            TestRunSummary summary)
+        {
+            RunId = runId;
+            Mode = mode;
+            State = state;
+            StartTimeUtc = startUtc;
+            EndTimeUtc = endUtc;
+            Summary = summary;
+        }
+
+        public string RunId { get; }
+        public TestMode Mode { get; }
+        public TestRunState State { get; }
+        public DateTime StartTimeUtc { get; }
+        public DateTime? EndTimeUtc { get; }
+        public TestRunSummary Summary { get; }
+        public double ElapsedSeconds
+        {
+            get
+            {
+                var end = EndTimeUtc ?? DateTime.UtcNow;
+                return Math.Max(0, (end - StartTimeUtc).TotalSeconds);
+            }
+        }
+
+        public object ToSerializable()
+        {
+            return new
+            {
+                runId = RunId,
+                mode = Mode.ToString(),
+                state = State.ToString(),
+                startedAt = StartTimeUtc.ToString("o"),
+                completedAt = EndTimeUtc?.ToString("o"),
+                elapsedSeconds = ElapsedSeconds,
+                summary = Summary?.ToSerializable(),
+            };
+        }
+    }
+
+    public enum TestRunState
+    {
+        Queued,
+        Running,
+        Cancelling,
+        Completed,
+        Failed,
+        Canceled,
+        Faulted,
     }
 }

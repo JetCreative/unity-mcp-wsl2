@@ -56,6 +56,19 @@
             </ui:VisualElement>
         </ui:VisualElement>
 
+        <!-- Python Tools Section -->
+        <ui:VisualElement name="python-tools-section" class="section">
+            <ui:Label text="Python Tools" class="section-title" />
+            <ui:VisualElement class="section-content">
+                <ui:Label name="python-tools-status" class="python-tools-message" text="" />
+                <ui:Label name="python-tools-hint" class="python-tools-hint" text="" />
+                <ui:VisualElement class="button-row">
+                    <ui:Button name="create-python-tools-button" text="Create Python Tools Asset" />
+                    <ui:Button name="open-python-tools-button" text="Select Asset" style="display: none;" />
+                </ui:VisualElement>
+            </ui:VisualElement>
+        </ui:VisualElement>
+
         <!-- Connection Section -->
         <ui:VisualElement name="connection-section" class="section">
             <ui:Label text="Connection" class="section-title" />

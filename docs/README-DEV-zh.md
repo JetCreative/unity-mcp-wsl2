@@ -97,6 +97,17 @@ X:\UnityProject\Library\PackageCache\com.coplaydev.unity-mcp@272123cfd97e
 
 注意：在最新版本中，Python 服务器源代码也打包在包内的 `UnityMcpServer~/src` 下。这对于本地测试或将 MCP 客户端直接指向打包服务器很方便。
 
+### WSL 共享服务器引导
+
+`Assets/unity-mcp-wsl2/Server` 不再维护独立的服务器副本，而是优先加载以下路径中第一个可用的“权威”安装：
+
+1. `UNITY_MCP_SERVER_PATH` 环境变量（支持 `;` 或 `:` 分隔的多个路径）
+2. `%USERPROFILE%\AppData\Local\UnityMCP\UnityMcpServer\src`（WSL 可通过 `/mnt/c/Users/<user>/...` 访问）
+3. `~/.config/UnityMCP/UnityMcpServer/src` 与 `~/.local/share/UnityMCP/UnityMcpServer/src`
+4. 仓库中的 `Assets/MCP/UnityMcpServer~/src`
+
+默认情况下这会让 WSL 端复用 Windows 安装的同一份 Python 代码，减少多份副本带来的偏差。如果需要手动指定路径，可设置 `UNITY_MCP_SERVER_PATH=/mnt/c/Users/<you>/AppData/Local/UnityMCP/UnityMcpServer/src`。
+
 ## MCP Bridge 压力测试
 
 按需压力测试实用程序通过多个并发客户端测试 MCP bridge，同时通过立即脚本编辑触发真实脚本重载（无需菜单调用）。
