@@ -35,6 +35,13 @@ MCP for Unity acts as a bridge, allowing AI assistants (like Claude, Cursor) to 
 * **🤖 Automation:** Automate repetitive Unity workflows.
 * **🧩 Extensible:** Designed to work with various MCP Clients.
 
+### WSL Fork Enhancements
+
+This fork adds Windows Subsystem for Linux (WSL) support and enhanced test runner capabilities:
+
+* **🐧 WSL Bootstrap Support:** Automatically detects and reuses the Windows installation when running from WSL, eliminating the need for duplicate setups. The server intelligently locates the Windows install at `/mnt/c/Users/USERNAME/AppData/Local/UnityMCP/...` or uses the `UNITY_MCP_SERVER_PATH` environment variable.
+* **🧪 Enhanced Test Runner:** Comprehensive Unity Test Framework integration with tools for listing tests, checking run status, retrieving results, rerunning failed tests, and canceling test runs. Perfect for CI/CD pipelines and automated testing workflows.
+
 <details open>
   <summary><strong>Tools</strong></summary>
 
