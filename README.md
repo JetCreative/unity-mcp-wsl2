@@ -41,22 +41,24 @@ MCP for Unity acts as a bridge, allowing AI assistants (like Claude, Cursor) to 
   Your LLM can use functions like:
 
 * `execute_menu_item`: Executes Unity Editor menu items (e.g., "File/Save Project").
-* `manage_asset`: Performs asset operations (import, create, modify, delete, etc.).
-* `manage_editor`: Controls and queries the editor's state and settings.
-* `manage_gameobject`: Manages GameObjects: create, modify, delete, find, and component operations.
-* `manage_prefabs`: Performs prefab operations (create, modify, delete, etc.).
-* `manage_scene`: Manages scenes (load, save, create, get hierarchy, etc.).
-* `manage_script`: Compatibility router for legacy script operations (create, read, delete). Prefer `apply_text_edits` or `script_apply_edits` for edits.
-* `manage_shader`: Performs shader CRUD operations (create, read, modify, delete).
-* `read_console`: Gets messages from or clears the console.
-* `run_tests`: Runs tests in the Unity Editor.
-* `set_active_instance`: Routes subsequent tool calls to a specific Unity instance (when multiple are running).
-* `apply_text_edits`: Precise text edits with precondition hashes and atomic multi-edit batches.
-* `script_apply_edits`: Structured C# method/class edits (insert/replace/delete) with safer boundaries.
-* `validate_script`: Fast validation (basic/standard) to catch syntax/structure issues before/after writes.
-* `create_script`: Create a new C# script at the given project path.
-* `delete_script`: Delete a C# script by URI or Assets-relative path.
-* `get_sha`: Get SHA256 and basic metadata for a Unity C# script without returning file contents.
+* `manage_asset`: Perform asset operations (import, create, modify, delete, etc.).
+* `manage_editor`: Control and query the editor’s state and settings (play/pause, scene info, etc.).
+* `manage_gameobject`: Create, modify, delete, find, and edit components on GameObjects.
+* `manage_prefabs`: End-to-end prefab operations (create, edit, save, delete).
+* `manage_scene`: Load, save, create scenes, and inspect hierarchies.
+* `manage_script` / `apply_text_edits` / `script_apply_edits`: Edit scripts using atomic text patches or structured method/class changes.
+* `manage_shader`: Shader CRUD helpers.
+* `read_console`: Stream Unity console output or clear logs.
+* `execute_menu_item`, `debug_request_context`: Drive editor UI and inspect the MCP context.
+* `run_tests`: Launch EditMode/PlayMode suites with filters (test names, assemblies, categories, groups).
+* `list_tests`: Query all discoverable tests from the Unity Test Runner.
+* `get_test_run_status`, `get_test_run_result`: Poll run state or retrieve the final serialized payload for a completed run.
+* `rerun_failed_tests`: Automatically replay only the failed tests from the most recent run (or a specific `runId`).
+* `cancel_test_run`: Cancel the in-flight Unity Test Runner execution.
+* `set_active_instance`: Route a single tool call—or the entire session—to a specific Unity instance when multiple editors are open.
+* `validate_script`, `create_script`, `delete_script`, `get_sha`: Quality-of-life helpers for authoring and verifying C# files.
+
+> **Test workflow tip:** Start runs with `wait_for_completion=false` if you prefer a fire-and-poll pattern, then use `get_test_run_status` / `get_test_run_result` (or re-run `run_tests` with `wait_for_completion=true`) once Unity reports the run as finished. `rerun_failed_tests` automatically pulls the latest failure list and honors the same filters/timeouts.
 </details>
 
 
@@ -134,18 +136,18 @@ MCP for Unity connects your tools using two components:
 ---
 ### 🌟 Step 1: Install the Unity Package
 
-#### To install via Git URL
+#### Install from Git URL (recommended)
 
 1. Open your Unity project.
-2. Go to `Window > Package Manager`.
-3. Click `+` -> `Add package from git URL...`.
-4. Enter:
+2. Navigate to `Window > Package Manager`.
+3. Click the `+` button → `Add package from git URL...`.
+4. Paste the Unity MCP WSL fork URL:
     ```
-    https://github.com/CoplayDev/unity-mcp.git?path=/MCPForUnity
+    https://github.com/CoplayDev/unity-mcp-wsl.git?path=/Assets/unity-mcp-wsl2/MCPForUnity
     ```
-5. Click `Add`.
+5. Click **Add**. Unity will fetch the latest bridge and embedded Python server sources from this repo.
 
-#### To install via OpenUPM
+#### Install via OpenUPM
 
 1. Install the [OpenUPM CLI](https://openupm.com/docs/getting-started-cli.html)
 2. Open a terminal (PowerShell, Terminal, etc.) and navigate to your Unity project directory
