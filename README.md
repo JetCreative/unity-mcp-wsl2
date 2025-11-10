@@ -143,7 +143,7 @@ MCP for Unity connects your tools using two components:
 3. Click the `+` button → `Add package from git URL...`.
 4. Paste the Unity MCP WSL fork URL:
     ```
-    https://github.com/CoplayDev/unity-mcp-wsl.git?path=/Assets/unity-mcp-wsl2/MCPForUnity
+    https://github.com/JetCreative/unity-mcp-wsl2.git?path=/MCPForUnity
     ```
 5. Click **Add**. Unity will fetch the latest bridge and embedded Python server sources from this repo.
 

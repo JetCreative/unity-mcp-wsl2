@@ -21,7 +21,7 @@ Version 5 introduces a new package structure. The package is now installed from 
 
 1. In the Package Manager, click the **+** button in the top-left corner
 2. Select **Add package from git URL...**
-3. Enter the following URL: `https://github.com/CoplayDev/unity-mcp-wsl.git?path=/Assets/unity-mcp-wsl2/MCPForUnity`
+3. Enter the following URL: `https://github.com/JetCreative/unity-mcp-wsl2.git?path=/MCPForUnity`
 4. Click **Add** to install the package
 
 ![Installing from the new MCPForUnity path](images/v5_02_install.png)

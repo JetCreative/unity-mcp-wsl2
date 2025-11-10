@@ -141,7 +141,7 @@ MCP for Unity 使用两个组件连接您的工具：
 3. 点击 `+` -> `Add package from git URL...`。
 4. 输入：
     ```
-    https://github.com/CoplayDev/unity-mcp-wsl.git?path=/Assets/unity-mcp-wsl2/MCPForUnity
+    https://github.com/JetCreative/unity-mcp-wsl2.git?path=/MCPForUnity
     ```
 5. 点击 `Add`。
 6. 包会同步带有最新补丁的 Python 服务器；首次运行或使用“自动设置”时会自动安装。
